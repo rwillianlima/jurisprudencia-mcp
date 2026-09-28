@@ -12,28 +12,172 @@ interface Env {
   GOOGLE_SCRIPT_SECRET: string;
 }
 
+
+// ============================================================
+// AUXILIAR — CONSULTA GOOGLE APPS SCRIPT
+// ============================================================
+
+async function consultarGoogleScript(
+  env: Env,
+  parametros: Record<string, unknown>
+) {
+  if (!env.GOOGLE_SCRIPT_SECRET) {
+    throw new Error(
+      "GOOGLE_SCRIPT_SECRET não está configurado no Cloudflare."
+    );
+  }
+
+  const corpo = {
+    segredo: env.GOOGLE_SCRIPT_SECRET,
+    acao: "pesquisarJurisprudencia",
+    parametros,
+  };
+
+  const resposta = await fetch(GOOGLE_SCRIPT_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "text/plain;charset=utf-8",
+    },
+    body: JSON.stringify(corpo),
+  });
+
+  const texto = await resposta.text();
+
+  if (!resposta.ok) {
+    throw new Error(
+      `Google Apps Script respondeu HTTP ${resposta.status}: ${texto}`
+    );
+  }
+
+  return texto;
+}
+
+
+// ============================================================
+// AUXILIAR — TRANSFORMA QUERY STRING EM PARÂMETROS DO SCRIPT
+// ============================================================
+
+function obterParametrosBaseJuridica(url: URL) {
+  const parametros: Record<string, unknown> = {};
+
+  const fontes = [
+    ...url.searchParams.getAll("fonte"),
+    ...url.searchParams.getAll("fontes"),
+  ]
+    .flatMap((valor) => valor.split(","))
+    .map((valor) => valor.trim())
+    .filter(Boolean);
+
+  if (fontes.length) {
+    parametros.fontes = [...new Set(fontes)];
+  }
+
+  const q =
+    url.searchParams.get("q") ||
+    url.searchParams.get("consultaBooleana");
+
+  if (q) {
+    parametros.consultaBooleana = q;
+  }
+
+  const termosObrigatorios = [
+    ...url.searchParams.getAll("termo_obrigatorio"),
+    ...url.searchParams.getAll("termosObrigatorios"),
+  ]
+    .flatMap((valor) => valor.split(","))
+    .map((valor) => valor.trim())
+    .filter(Boolean);
+
+  if (termosObrigatorios.length) {
+    parametros.termosObrigatorios = termosObrigatorios;
+  }
+
+  const expressoesExatas = [
+    ...url.searchParams.getAll("expressao_exata"),
+    ...url.searchParams.getAll("expressoesExatas"),
+  ]
+    .flatMap((valor) => valor.split(","))
+    .map((valor) => valor.trim())
+    .filter(Boolean);
+
+  if (expressoesExatas.length) {
+    parametros.expressoesExatas = expressoesExatas;
+  }
+
+  const termosOpcionais = [
+    ...url.searchParams.getAll("termo_opcional"),
+    ...url.searchParams.getAll("termosOpcionais"),
+  ]
+    .flatMap((valor) => valor.split(","))
+    .map((valor) => valor.trim())
+    .filter(Boolean);
+
+  if (termosOpcionais.length) {
+    parametros.termosOpcionais = termosOpcionais;
+  }
+
+  const numero = url.searchParams.get("numero");
+  if (numero) parametros.numero = numero;
+
+  const relator = url.searchParams.get("relator");
+  if (relator) parametros.relator = relator;
+
+  const dataInicio =
+    url.searchParams.get("data_inicio") ||
+    url.searchParams.get("dataInicio");
+
+  if (dataInicio) parametros.dataInicio = dataInicio;
+
+  const dataFim =
+    url.searchParams.get("data_fim") ||
+    url.searchParams.get("dataFim");
+
+  if (dataFim) parametros.dataFim = dataFim;
+
+  const area = url.searchParams.get("area");
+  if (area) parametros.area = area;
+
+  const status = url.searchParams.get("status");
+  if (status) parametros.status = status;
+
+  const limite = Number(url.searchParams.get("limite") || "20");
+
+  parametros.limite =
+    Number.isFinite(limite) && limite >= 1
+      ? Math.min(limite, 100)
+      : 20;
+
+  return parametros;
+}
+
+
+// ============================================================
+// MCP
+// ============================================================
+
 function createServer(env: Env) {
   const server = new McpServer({
     name: "Jurisprudencia TJGO",
-    version: "1.1.0",
+    version: "1.2.0",
   });
 
-  // ============================================================
-  // FERRAMENTA 1 — JURISPRUDÊNCIA COMPLETA TJGO / TURSO
-  // ============================================================
+
+  // ----------------------------------------------------------
+  // FERRAMENTA 1 — TURSO / TJGO
+  // ----------------------------------------------------------
 
   server.registerTool(
     "pesquisar_jurisprudencia_tjgo",
     {
       description:
-        "Pesquisa acórdãos e ementas na base completa de jurisprudência do TJGO. Use para localizar precedentes por tese jurídica, relator, Câmara, processo ou período.",
+        "Pesquisa acórdãos e ementas na base completa de jurisprudência do Tribunal de Justiça do Estado de Goiás (TJGO).",
 
       inputSchema: {
         q: z
           .string()
           .optional()
           .describe(
-            'Consulta FTS5. Aceita AND, OR, NOT, aspas e parênteses.'
+            "Consulta textual. Aceita AND, OR, NOT, aspas e parênteses."
           ),
 
         relator: z
@@ -49,7 +193,7 @@ function createServer(env: Env) {
         processo: z
           .string()
           .optional()
-          .describe("Número do processo no padrão CNJ."),
+          .describe("Número do processo."),
 
         data_de: z
           .string()
@@ -96,20 +240,46 @@ function createServer(env: Env) {
       limite,
       pagina,
     }) => {
-      const params = new URLSearchParams();
-
-      if (q) params.set("q", q);
-      if (relator) params.append("relator", relator);
-      if (camara) params.append("camara", camara);
-      if (processo) params.set("processo", processo);
-      if (data_de) params.set("data_de", data_de);
-      if (data_ate) params.set("data_ate", data_ate);
-
-      params.set("ordem", ordem || "relevancia");
-      params.set("limite", String(limite || 20));
-      params.set("pagina", String(pagina || 1));
-
       try {
+        const params = new URLSearchParams();
+
+        if (q) params.set("q", q);
+
+        if (relator) {
+          params.append("relator", relator);
+        }
+
+        if (camara) {
+          params.append("camara", camara);
+        }
+
+        if (processo) {
+          params.set("processo", processo);
+        }
+
+        if (data_de) {
+          params.set("data_de", data_de);
+        }
+
+        if (data_ate) {
+          params.set("data_ate", data_ate);
+        }
+
+        params.set(
+          "ordem",
+          ordem || "relevancia"
+        );
+
+        params.set(
+          "limite",
+          String(limite || 20)
+        );
+
+        params.set(
+          "pagina",
+          String(pagina || 1)
+        );
+
         const resposta = await fetch(
           `${API_TJGO}/buscar?${params.toString()}`
         );
@@ -119,142 +289,107 @@ function createServer(env: Env) {
         if (!resposta.ok) {
           return {
             isError: true,
-            content: [{
-              type: "text",
-              text:
-                `Erro ao consultar a jurisprudência TJGO. ` +
-                `HTTP ${resposta.status}: ${texto}`,
-            }],
+            content: [
+              {
+                type: "text",
+                text:
+                  `Erro na jurisprudência TJGO. ` +
+                  `HTTP ${resposta.status}: ${texto}`,
+              },
+            ],
           };
         }
 
         return {
-          content: [{
-            type: "text",
-            text: texto,
-          }],
+          content: [
+            {
+              type: "text",
+              text: texto,
+            },
+          ],
         };
-
       } catch (erro) {
         return {
           isError: true,
-          content: [{
-            type: "text",
-            text:
-              "Falha ao acessar a API de jurisprudência: " +
-              String(erro),
-          }],
+          content: [
+            {
+              type: "text",
+              text:
+                "Falha ao consultar jurisprudência TJGO: " +
+                String(erro),
+            },
+          ],
         };
       }
     }
   );
 
-  // ============================================================
+
+  // ----------------------------------------------------------
   // FERRAMENTA 2 — GOOGLE APPS SCRIPT
-  // Súmulas, Temas e posicionamentoInterno
-  // ============================================================
+  // ----------------------------------------------------------
 
   server.registerTool(
     "consultar_base_juridica",
     {
       description:
-        "Consulta a base jurídica interna do Gabinete. Use para pesquisar Súmulas TJGO/STJ/STF, Temas STJ, Temas TJGO/IRDR e posicionamentoInterno do Des. Fernando Ribeiro Montefusco.",
+        "Consulta a base jurídica interna com Súmulas TJGO, STJ e STF, Temas STJ, Temas TJGO e posicionamento interno.",
 
       inputSchema: {
         fontes: z
-          .array(
-            z.enum([
-              "SUMULAS_TJGO",
-              "SUMULAS_STJ",
-              "SUMULAS_STF",
-              "TEMAS_STJ",
-              "TEMAS_TJGO",
-            ])
-          )
+          .array(z.string())
           .optional()
           .describe(
-            "Fontes que devem ser consultadas."
+            "Bases a pesquisar, como SUMULAS_TJGO, SUMULAS_STJ, SUMULAS_STF, TEMAS_STJ e TEMAS_TJGO."
           ),
 
         consultaBooleana: z
           .string()
           .optional()
-          .describe(
-            'Consulta textual. Aceita e, ou, não, aspas e parênteses.'
-          ),
+          .describe("Consulta textual ou booleana."),
 
         termosObrigatorios: z
           .array(z.string())
-          .optional()
-          .describe(
-            "Termos que obrigatoriamente devem constar no resultado."
-          ),
+          .optional(),
 
         expressoesExatas: z
           .array(z.string())
-          .optional()
-          .describe(
-            "Expressões exatas a pesquisar."
-          ),
+          .optional(),
 
         termosOpcionais: z
           .array(z.string())
-          .optional()
-          .describe(
-            "Termos opcionais usados para aumentar a relevância."
-          ),
+          .optional(),
 
         numero: z
           .string()
-          .optional()
-          .describe(
-            "Número exato de Súmula ou Tema, quando aplicável."
-          ),
+          .optional(),
 
         relator: z
           .string()
-          .optional()
-          .describe(
-            "Filtro por relator, quando necessário."
-          ),
+          .optional(),
 
         dataInicio: z
           .string()
-          .optional()
-          .describe(
-            "Data inicial para filtros temporais."
-          ),
+          .optional(),
 
         dataFim: z
           .string()
-          .optional()
-          .describe(
-            "Data final para filtros temporais."
-          ),
+          .optional(),
 
         area: z
           .string()
-          .optional()
-          .describe(
-            "Área jurídica para filtrar posicionamento interno."
-          ),
+          .optional(),
 
         status: z
           .string()
-          .optional()
-          .describe(
-            'Status do posicionamento interno. Normalmente "VIGENTE".'
-          ),
+          .optional(),
 
         limite: z
           .number()
           .int()
           .min(1)
           .max(100)
-          .optional()
-          .describe(
-            "Quantidade máxima de resultados."
-          ),
+          .optional(),
       },
     },
 
@@ -272,93 +407,84 @@ function createServer(env: Env) {
       status,
       limite,
     }) => {
-
-      const parametros: Record<string, unknown> = {};
-
-      if (fontes?.length)
-        parametros.fontes = fontes;
-
-      if (consultaBooleana)
-        parametros.consultaBooleana = consultaBooleana;
-
-      if (termosObrigatorios?.length)
-        parametros.termosObrigatorios = termosObrigatorios;
-
-      if (expressoesExatas?.length)
-        parametros.expressoesExatas = expressoesExatas;
-
-      if (termosOpcionais?.length)
-        parametros.termosOpcionais = termosOpcionais;
-
-      if (numero)
-        parametros.numero = numero;
-
-      if (relator)
-        parametros.relator = relator;
-
-      if (dataInicio)
-        parametros.dataInicio = dataInicio;
-
-      if (dataFim)
-        parametros.dataFim = dataFim;
-
-      if (area)
-        parametros.area = area;
-
-      if (status)
-        parametros.status = status;
-
-      parametros.limite = limite || 20;
-
-      const corpo = {
-        segredo: env.GOOGLE_SCRIPT_SECRET,
-        acao: "pesquisarJurisprudencia",
-        parametros,
-      };
-
       try {
-        const resposta = await fetch(
-          GOOGLE_SCRIPT_URL,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type":
-                "text/plain;charset=utf-8",
-            },
-            body: JSON.stringify(corpo),
-          }
-        );
+        const parametros: Record<string, unknown> = {};
 
-        const texto = await resposta.text();
-
-        if (!resposta.ok) {
-          return {
-            isError: true,
-            content: [{
-              type: "text",
-              text:
-                `Erro ao consultar a base jurídica. ` +
-                `HTTP ${resposta.status}: ${texto}`,
-            }],
-          };
+        if (fontes?.length) {
+          parametros.fontes = fontes;
         }
 
-        return {
-          content: [{
-            type: "text",
-            text: texto,
-          }],
-        };
+        if (consultaBooleana) {
+          parametros.consultaBooleana =
+            consultaBooleana;
+        }
 
+        if (termosObrigatorios?.length) {
+          parametros.termosObrigatorios =
+            termosObrigatorios;
+        }
+
+        if (expressoesExatas?.length) {
+          parametros.expressoesExatas =
+            expressoesExatas;
+        }
+
+        if (termosOpcionais?.length) {
+          parametros.termosOpcionais =
+            termosOpcionais;
+        }
+
+        if (numero) {
+          parametros.numero = numero;
+        }
+
+        if (relator) {
+          parametros.relator = relator;
+        }
+
+        if (dataInicio) {
+          parametros.dataInicio = dataInicio;
+        }
+
+        if (dataFim) {
+          parametros.dataFim = dataFim;
+        }
+
+        if (area) {
+          parametros.area = area;
+        }
+
+        if (status) {
+          parametros.status = status;
+        }
+
+        parametros.limite = limite || 20;
+
+        const texto =
+          await consultarGoogleScript(
+            env,
+            parametros
+          );
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: texto,
+            },
+          ],
+        };
       } catch (erro) {
         return {
           isError: true,
-          content: [{
-            type: "text",
-            text:
-              "Falha ao acessar a base jurídica: " +
-              String(erro),
-          }],
+          content: [
+            {
+              type: "text",
+              text:
+                "Falha ao consultar a base jurídica: " +
+                String(erro),
+            },
+          ],
         };
       }
     }
@@ -367,18 +493,143 @@ function createServer(env: Env) {
   return server;
 }
 
+
+// ============================================================
+// WORKER
+// ============================================================
+
 export default {
-  fetch(
+  async fetch(
     request: Request,
     env: Env,
     ctx: ExecutionContext
-  ) {
-    return createMcpHandler(
-      () => createServer(env)
-    )(
+  ): Promise<Response> {
+
+    const url = new URL(request.url);
+
+
+    // --------------------------------------------------------
+    // REST — GOOGLE APPS SCRIPT
+    // --------------------------------------------------------
+
+    if (
+      url.pathname === "/api/base-juridica" &&
+      request.method === "GET"
+    ) {
+      try {
+        const parametros =
+          obterParametrosBaseJuridica(url);
+
+        const texto =
+          await consultarGoogleScript(
+            env,
+            parametros
+          );
+
+        return new Response(texto, {
+          status: 200,
+          headers: {
+            "Content-Type":
+              "application/json; charset=utf-8",
+            "Cache-Control": "no-store",
+          },
+        });
+      } catch (erro) {
+        return Response.json(
+          {
+            erro:
+              "Falha ao consultar a base jurídica.",
+            detalhe: String(erro),
+          },
+          {
+            status: 500,
+          }
+        );
+      }
+    }
+
+
+    // --------------------------------------------------------
+    // REST — TURSO
+    // --------------------------------------------------------
+
+    if (
+      url.pathname === "/api/jurisprudencia" &&
+      request.method === "GET"
+    ) {
+      try {
+        const destino =
+          `${API_TJGO}/buscar${url.search}`;
+
+        const resposta =
+          await fetch(destino);
+
+        const corpo =
+          await resposta.text();
+
+        return new Response(corpo, {
+          status: resposta.status,
+          headers: {
+            "Content-Type":
+              resposta.headers.get("Content-Type") ||
+              "application/json; charset=utf-8",
+            "Cache-Control": "no-store",
+          },
+        });
+      } catch (erro) {
+        return Response.json(
+          {
+            erro:
+              "Falha ao consultar a jurisprudência TJGO.",
+            detalhe: String(erro),
+          },
+          {
+            status: 500,
+          }
+        );
+      }
+    }
+
+
+    // --------------------------------------------------------
+    // HEALTH
+    // --------------------------------------------------------
+
+    if (
+      url.pathname === "/health" &&
+      request.method === "GET"
+    ) {
+      return Response.json({
+        status: "ok",
+        servico: "jurisprudencia-mcp",
+        ferramentas: [
+          "pesquisar_jurisprudencia_tjgo",
+          "consultar_base_juridica",
+        ],
+        endpoints: [
+          "/mcp",
+          "/api/jurisprudencia",
+          "/api/base-juridica",
+        ],
+      });
+    }
+
+
+    // --------------------------------------------------------
+    // MCP
+    // --------------------------------------------------------
+
+    const mcp = createMcpHandler(
+      () => createServer(env),
+      {
+        route: "/mcp",
+      }
+    );
+
+    return mcp(
       request,
       env,
       ctx
     );
   },
-};
+} satisfies ExportedHandler<Env>;
