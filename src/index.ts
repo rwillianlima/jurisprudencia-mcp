@@ -5,60 +5,61 @@ import { z } from "zod";
 const API_TJGO =
   "https://jurisprudencia-api.renatowill.workers.dev";
 
-function createServer() {
+const GOOGLE_SCRIPT_URL =
+  "https://script.google.com/macros/s/AKfycbxE2EufYylpYQ7eo2iXtX16nnV8BWvIq6c-OqIRu15ASnWV0gv4X15v7Y9_L-sm_rbL/exec";
+
+interface Env {
+  GOOGLE_SCRIPT_SECRET: string;
+}
+
+function createServer(env: Env) {
   const server = new McpServer({
     name: "Jurisprudencia TJGO",
-    version: "1.0.0",
+    version: "1.1.0",
   });
+
+  // ============================================================
+  // FERRAMENTA 1 — JURISPRUDÊNCIA COMPLETA TJGO / TURSO
+  // ============================================================
 
   server.registerTool(
     "pesquisar_jurisprudencia_tjgo",
     {
       description:
-        "Pesquisa acórdãos e ementas na base completa de jurisprudência do Tribunal de Justiça do Estado de Goiás (TJGO). Use para localizar precedentes por tese jurídica, relator, Câmara, processo ou período.",
+        "Pesquisa acórdãos e ementas na base completa de jurisprudência do TJGO. Use para localizar precedentes por tese jurídica, relator, Câmara, processo ou período.",
 
       inputSchema: {
         q: z
           .string()
           .optional()
           .describe(
-            'Consulta textual FTS5. Aceita AND, OR, NOT, aspas e parênteses. Ex.: "gratuidade da justiça" AND hipossuficiencia'
+            'Consulta FTS5. Aceita AND, OR, NOT, aspas e parênteses.'
           ),
 
         relator: z
           .string()
           .optional()
-          .describe(
-            'Nome ou parte do nome do relator. Ex.: "Montefusco"'
-          ),
+          .describe("Nome ou parte do nome do relator."),
 
         camara: z
           .string()
           .optional()
-          .describe(
-            'Câmara ou órgão julgador. Ex.: "6ª Câmara Cível"'
-          ),
+          .describe("Câmara ou órgão julgador."),
 
         processo: z
           .string()
           .optional()
-          .describe(
-            "Número do processo no padrão CNJ."
-          ),
+          .describe("Número do processo no padrão CNJ."),
 
         data_de: z
           .string()
           .optional()
-          .describe(
-            "Data inicial do julgamento no formato AAAA-MM-DD."
-          ),
+          .describe("Data inicial no formato AAAA-MM-DD."),
 
         data_ate: z
           .string()
           .optional()
-          .describe(
-            "Data final do julgamento no formato AAAA-MM-DD."
-          ),
+          .describe("Data final no formato AAAA-MM-DD."),
 
         ordem: z
           .enum([
@@ -67,29 +68,20 @@ function createServer() {
             "data_asc",
             "processo",
           ])
-          .optional()
-          .describe(
-            "Ordenação dos resultados."
-          ),
+          .optional(),
 
         limite: z
           .number()
           .int()
           .min(1)
           .max(100)
-          .optional()
-          .describe(
-            "Quantidade máxima de resultados."
-          ),
+          .optional(),
 
         pagina: z
           .number()
           .int()
           .min(1)
-          .optional()
-          .describe(
-            "Página dos resultados."
-          ),
+          .optional(),
       },
     },
 
@@ -127,36 +119,246 @@ function createServer() {
         if (!resposta.ok) {
           return {
             isError: true,
-            content: [
-              {
-                type: "text",
-                text:
-                  `Erro ao consultar a jurisprudência TJGO. ` +
-                  `HTTP ${resposta.status}: ${texto}`,
-              },
-            ],
+            content: [{
+              type: "text",
+              text:
+                `Erro ao consultar a jurisprudência TJGO. ` +
+                `HTTP ${resposta.status}: ${texto}`,
+            }],
           };
         }
 
         return {
-          content: [
-            {
-              type: "text",
-              text: texto,
-            },
-          ],
+          content: [{
+            type: "text",
+            text: texto,
+          }],
         };
+
       } catch (erro) {
         return {
           isError: true,
-          content: [
-            {
+          content: [{
+            type: "text",
+            text:
+              "Falha ao acessar a API de jurisprudência: " +
+              String(erro),
+          }],
+        };
+      }
+    }
+  );
+
+  // ============================================================
+  // FERRAMENTA 2 — GOOGLE APPS SCRIPT
+  // Súmulas, Temas e posicionamentoInterno
+  // ============================================================
+
+  server.registerTool(
+    "consultar_base_juridica",
+    {
+      description:
+        "Consulta a base jurídica interna do Gabinete. Use para pesquisar Súmulas TJGO/STJ/STF, Temas STJ, Temas TJGO/IRDR e posicionamentoInterno do Des. Fernando Ribeiro Montefusco.",
+
+      inputSchema: {
+        fontes: z
+          .array(
+            z.enum([
+              "SUMULAS_TJGO",
+              "SUMULAS_STJ",
+              "SUMULAS_STF",
+              "TEMAS_STJ",
+              "TEMAS_TJGO",
+            ])
+          )
+          .optional()
+          .describe(
+            "Fontes que devem ser consultadas."
+          ),
+
+        consultaBooleana: z
+          .string()
+          .optional()
+          .describe(
+            'Consulta textual. Aceita e, ou, não, aspas e parênteses.'
+          ),
+
+        termosObrigatorios: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Termos que obrigatoriamente devem constar no resultado."
+          ),
+
+        expressoesExatas: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Expressões exatas a pesquisar."
+          ),
+
+        termosOpcionais: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Termos opcionais usados para aumentar a relevância."
+          ),
+
+        numero: z
+          .string()
+          .optional()
+          .describe(
+            "Número exato de Súmula ou Tema, quando aplicável."
+          ),
+
+        relator: z
+          .string()
+          .optional()
+          .describe(
+            "Filtro por relator, quando necessário."
+          ),
+
+        dataInicio: z
+          .string()
+          .optional()
+          .describe(
+            "Data inicial para filtros temporais."
+          ),
+
+        dataFim: z
+          .string()
+          .optional()
+          .describe(
+            "Data final para filtros temporais."
+          ),
+
+        area: z
+          .string()
+          .optional()
+          .describe(
+            "Área jurídica para filtrar posicionamento interno."
+          ),
+
+        status: z
+          .string()
+          .optional()
+          .describe(
+            'Status do posicionamento interno. Normalmente "VIGENTE".'
+          ),
+
+        limite: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .optional()
+          .describe(
+            "Quantidade máxima de resultados."
+          ),
+      },
+    },
+
+    async ({
+      fontes,
+      consultaBooleana,
+      termosObrigatorios,
+      expressoesExatas,
+      termosOpcionais,
+      numero,
+      relator,
+      dataInicio,
+      dataFim,
+      area,
+      status,
+      limite,
+    }) => {
+
+      const parametros: Record<string, unknown> = {};
+
+      if (fontes?.length)
+        parametros.fontes = fontes;
+
+      if (consultaBooleana)
+        parametros.consultaBooleana = consultaBooleana;
+
+      if (termosObrigatorios?.length)
+        parametros.termosObrigatorios = termosObrigatorios;
+
+      if (expressoesExatas?.length)
+        parametros.expressoesExatas = expressoesExatas;
+
+      if (termosOpcionais?.length)
+        parametros.termosOpcionais = termosOpcionais;
+
+      if (numero)
+        parametros.numero = numero;
+
+      if (relator)
+        parametros.relator = relator;
+
+      if (dataInicio)
+        parametros.dataInicio = dataInicio;
+
+      if (dataFim)
+        parametros.dataFim = dataFim;
+
+      if (area)
+        parametros.area = area;
+
+      if (status)
+        parametros.status = status;
+
+      parametros.limite = limite || 20;
+
+      const corpo = {
+        segredo: env.GOOGLE_SCRIPT_SECRET,
+        acao: "pesquisarJurisprudencia",
+        parametros,
+      };
+
+      try {
+        const resposta = await fetch(
+          GOOGLE_SCRIPT_URL,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type":
+                "text/plain;charset=utf-8",
+            },
+            body: JSON.stringify(corpo),
+          }
+        );
+
+        const texto = await resposta.text();
+
+        if (!resposta.ok) {
+          return {
+            isError: true,
+            content: [{
               type: "text",
               text:
-                "Falha ao acessar a API de jurisprudência: " +
-                String(erro),
-            },
-          ],
+                `Erro ao consultar a base jurídica. ` +
+                `HTTP ${resposta.status}: ${texto}`,
+            }],
+          };
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: texto,
+          }],
+        };
+
+      } catch (erro) {
+        return {
+          isError: true,
+          content: [{
+            type: "text",
+            text:
+              "Falha ao acessar a base jurídica: " +
+              String(erro),
+          }],
         };
       }
     }
@@ -166,8 +368,14 @@ function createServer() {
 }
 
 export default {
-  fetch(request: Request, env: unknown, ctx: ExecutionContext) {
-    return createMcpHandler(createServer)(
+  fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext
+  ) {
+    return createMcpHandler(
+      () => createServer(env)
+    )(
       request,
       env,
       ctx
